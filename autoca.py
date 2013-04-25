@@ -43,6 +43,9 @@ basicConstraints = CA:{CATF}
 # ------------------------------------------------------------
 
 default_config={
+    'global': {
+        'umask': '0o007'
+        },
     'DN': {
         'C': 'US',
         'ST': 'Massachusetts',
@@ -327,6 +330,15 @@ def signcsr(pths,ipths,config,password):
 
 # ------------------------------------------------------------
 
+def set_umask(mask):
+    if isinstance(mask, str) and \
+            re.match(r'^0[ox][0-7]+$',mask):
+        os.umask(eval(mask))
+    elif isinstance(mask, int):
+        os.umask(mask)
+
+# ------------------------------------------------------------
+
 def run():
     global default_config, req_config
 
@@ -396,6 +408,7 @@ def run():
     # configuration loading
     if not path.exists(config_path):
         config=default_config
+        set_umask(config['global']['umask'])
         if op!='writeconfig':
             config_path=jnorm(ca_dir,'./config.json')
             with open(config_path,'w') as f:
