@@ -65,6 +65,9 @@ default_config={
         'expiration': 3650
         },
     'keys': {
+        'algorithm': 'RSA',
+        'curve': 'secp384r1',
+        'rsa_bits': 4096,
         'paramfile': 'params.pem'
         }
     }
@@ -200,25 +203,30 @@ def ensure_inner_paths(ca_pths, config, simple):
 # Private Key Generation
 # ------------------------------------------------------------
 
-def genparams(params):
+def genparams(params, curve):
     with open('/dev/null','w') as f:
         ps=subprocess.Popen(
             ['openssl','ecparam',
              '-out',params,
-             '-name','secp384r1'],
+             '-name',curve],
             stdout=f,stderr=f,
             shell=False)
         return ps.wait()==0
 
 # ------------------------------------------------------------
 
-def genpkey(pth,paramfile,password=None):
+def genpkey(pth,config,paramfile,password=None):
     def _inner_genpkey(pp):
         with open('/dev/null','w') as f:
             args=['openssl','genpkey',
                   '-outform','PEM',
-                  '-paramfile',paramfile,
                   '-out',pth if pth else '/dev/stdout']
+            if config['keys']['algorithm']=='EC' and paramfile:
+                args.extend(['-paramfile',paramfile])
+            elif config['keys']['algorithm']=='RSA':
+                args.extend(['-algorithm','RSA',
+                             '-pkeyopt','rsa_keygen_bits:{}'.format(
+                            config['keys']['rsa_bits'])])
             if pp:
                 args.extend(['-pass','fd:{}'.format(pp.getfd()),
                              '-aes256'])
@@ -360,7 +368,6 @@ def run():
                       default=ca_dir,
                       help='base directory')
     args.add_argument('-p','--keyparams',dest='params',
-                      default='params.pem',
                       help='openssl genpkey params file')
     args.add_argument('-o','--out',dest='out',
                       help='manual output file')
@@ -388,7 +395,6 @@ def run():
     ca_dir=norm(opts.target)
     op=opts.op
     config_path=jnorm(ca_dir, opts.config)
-    params=jnorm(ca_dir, opts.params)
 
     config=None
     # configuration loading
@@ -404,16 +410,27 @@ def run():
             config=json.load(f)
         set_umask(config['global']['umask'])
 
-    if op!='writeconfig':
+    algorithm=config['keys']['algorithm'].upper()
+    config['keys']['algorithm']=algorithm
+
+    params=None
+    if algorithm=='EC':
+        if opts.params:
+            params=jnorm(ca_dir, opts.params)
+        else:
+            params=jnorm(ca_dir, config['keys']['paramfile'])
+
+    if op!='writeconfig' and params:
         # generate params
         if not path.exists(params):
-            params=jnorm(ca_dir, './params.pem')
-            genparams(params)
+            params=jnorm(ca_dir, config['keys']['paramfile'])
+            if not genparams(params, config['keys']['curve']):
+                raise Exception('EC may not be supported (Fedora?)')
 
     authority=opts.authority or config['ca']['name']
     short=opts.short
-    if not opts.short and  opts.cn:
-        short=re.sub(r'[^A-Za-z0-9.]+',opts.cn,'_')
+    if not opts.short and opts.cn:
+        short=re.sub(r'[^A-Za-z0-9.]+','', opts.cn)
     cn=opts.cn
     unit=opts.unit
     password=opts.password
@@ -431,7 +448,7 @@ def run():
         pw=None
         if password:
             pw=get_password(True)
-        genpkey(pth,params,pw)
+        genpkey(pth,config,params,pw)
 
     elif op=='writeconfig':
         if not out:
@@ -446,7 +463,7 @@ def run():
         pw=None
         if password:
             pw=get_password(True, 'Password for CA key: ')
-        genpkey(pths['key'], params, pw)
+        genpkey(pths['key'], config, params, pw)
         gencsr(pths,
                {'CN':cn, 'OU': unit},
                config,pw,True)
@@ -460,7 +477,7 @@ def run():
         pw=None
         if password:
             pw=get_password(True, 'Password for new key: ')
-        genpkey(ipths['key'], params, pw)
+        genpkey(ipths['key'], config, params, pw)
         # create csr
         gencsr(ipths,
                {'CN':cn, 'OU': unit},
