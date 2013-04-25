@@ -365,7 +365,7 @@ def run():
     args.add_argument('-o','--out',dest='out',
                       help='manual output file')
     args.add_argument('-s','--short',dest='short',
-                      help='short name (such as "ca" or "ema301")')
+                      help='short name')
     args.add_argument('-a','--authority',dest='authority',
                       help='authority short name (such as "ca")')
     args.add_argument('-n','--name',dest='cn',
@@ -389,22 +389,8 @@ def run():
     op=opts.op
     config_path=jnorm(ca_dir, opts.config)
     params=jnorm(ca_dir, opts.params)
-    authority=opts.authority
-    short=opts.short
-    if not opts.short and  opts.cn:
-        short=re.sub(r'[^A-Za-z0-9.]+',opts.cn,'_')
-    cn=opts.cn
-    unit=opts.unit
-    password=opts.password
-    out=norm(opts.out) if opts.out else None
 
     config=None
-    if op!='writeconfig':
-        # generate params
-        if not path.exists(params):
-            params=jnorm(ca_dir, './params.pem')
-            genparams(params)
-
     # configuration loading
     if not path.exists(config_path):
         config=default_config
@@ -416,6 +402,22 @@ def run():
     else:
         with open(config_path) as f:
             config=json.load(f)
+        set_umask(config['global']['umask'])
+
+    if op!='writeconfig':
+        # generate params
+        if not path.exists(params):
+            params=jnorm(ca_dir, './params.pem')
+            genparams(params)
+
+    authority=opts.authority or config['ca']['name']
+    short=opts.short
+    if not opts.short and  opts.cn:
+        short=re.sub(r'[^A-Za-z0-9.]+',opts.cn,'_')
+    cn=opts.cn
+    unit=opts.unit
+    password=opts.password
+    out=norm(opts.out) if opts.out else None
 
     # perform operation
     if op=='keygen':
@@ -440,8 +442,7 @@ def run():
     elif op=='mkca':
         if not cn:
             raise Exception('Common Name required for mkca')
-        caname=authority or short
-        pths=ensure_paths(ca_dir, caname, config)
+        pths=ensure_paths(ca_dir, authority, config)
         pw=None
         if password:
             pw=get_password(True, 'Password for CA key: ')
