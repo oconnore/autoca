@@ -8,6 +8,13 @@ import os,re,sys,subprocess,argparse,getpass,traceback
 import json, tempfile, base64
 from os import path
 
+use_keyring=False
+try:
+    import keyring
+    use_keyring=True
+except:
+    pass
+
 # ------------------------------------------------------------
 # x509 Request Configuration
 # ------------------------------------------------------------
@@ -368,6 +375,59 @@ def signcsr(pths,ipths,config,password):
 
 # ------------------------------------------------------------
 
+def genpkcs12(pths, ipths, config, short, keypw, password):
+    def _inner_genpkcs12(keypp, pp):
+        with open('/dev/null','w') as f:
+            args=['openssl','pkcs12',
+                  '-export',
+                  '-in',ipths['cert'],
+                  '-inkey',ipths['key'],
+                  '-out',ipths['p12'],
+                  '-name',short,
+                  '-certfile',pths['cert'],
+                  '-passout','fd:{}'.format(keypp.getfd())
+                  ]
+            if pp:
+                args.extend(['-passin','fd:{}'
+                             .format(pp.getfd())])
+            ps=subprocess.Popen(args,
+                                stdout=None,stderr=None,
+                                close_fds=False,
+                                shell=False)
+            return ps.wait()==0
+    with PasswordPipe(password) as keypp:
+        if password:
+            with PasswordPipe(keypw) as pp:
+                return _inner_genpkcs12(keypp, pp)
+        else:
+            return _inner_genpkcs12(None)
+
+# ------------------------------------------------------------
+# Keyring support functions
+
+def keyring_lookup(*args):
+    ls=[]
+    for x in args:
+        ls.append(re.sub(r'[^A-Za-z0-9.-_]+','',x))
+    return '_'.join(ls)
+
+def set_keyring(password, *args):
+    global use_keyring
+    if use_keyring:
+        keyring.set_password('autoca', keyring_lookup(*args), password)
+
+def get_keyring(*args):
+    global use_keyring
+    if use_keyring:
+        return keyring.get_password('autoca',keyring_lookup(*args))
+
+def del_keyring(*args):
+    global use_keyring
+    if use_keyring:
+        return keyring.delete_password('autoca',keyring_lookup(*args))
+
+# ------------------------------------------------------------
+
 def set_umask(mask):
     if isinstance(mask, str) and \
             re.match(r'^0[ox][0-7]+$',mask):
@@ -378,7 +438,9 @@ def set_umask(mask):
 # ------------------------------------------------------------
 
 def run():
-    global default_config, req_config
+    global default_config, req_config, use_keyring
+
+    op_on_success=[]
 
     # base directory
     env_name='AUTOCA_DIR'
@@ -493,6 +555,7 @@ def run():
         pw=None
         if password:
             pw=get_password(True, 'Password for CA key: ')
+            set_keyring(pw,'CA',authority,'key')
         genpkey(pths['key'], config, params, pw)
         gencsr(pths,
                {'CN':cn, 'OU': unit},
@@ -507,6 +570,7 @@ def run():
         pw=None
         if password:
             pw=get_password(True, 'Password for new key: ')
+            set_keyring(pw,'CA',authority,'CERT',short)
         genpkey(ipths['key'], config, params, pw)
         # create csr
         gencsr(ipths,
@@ -515,8 +579,23 @@ def run():
         # sign certificate
         ca_pw=None
         if is_password_required(pths['key']):
-            ca_pw=get_password(False, 'Password for CA key: ')
-        signcsr(pths, ipths, config, ca_pw)
+            ca_pw=get_keyring('CA',authority,'key')
+            valid=test_password(pths['key'], ca_pw)
+            if ca_pw and not valid:
+                del_keyring('CA',authority,'key')
+            if not valid:
+                ca_pw=get_password(False, 'Password for CA key: ')
+                op_on_success.append(fwrap(
+                        lambda x: set_keyring(
+                            x[0],'CA',x[1],'key'),
+                        [pw,authority]))
+        if not signcsr(pths, ipths, config, ca_pw):
+            eprint('Error creating certificate')
+            return
+        else:
+            for op in op_on_success:
+                op()
+
     elif op=='mkp12':
         pths=get_paths(ca_dir, authority, config)
         if not path.exists(pths['leaves']):
@@ -528,6 +607,10 @@ def run():
             pw=get_keyring('CA',authority,'CERT',short)
             if not pw:
                 pw=get_password(False, 'Password for key: ')
+                op_on_success.append(fwrap(
+                        lambda x: set_keyring(
+                            x[0],'CA',x[1],'CERT',x[2]),
+                        [pw,authority,short]))
         if password:
             p12pw=get_password(True, 'Password for PKCS12: ')
         else:
@@ -537,6 +620,9 @@ def run():
         if not genpkcs12(pths, ipths, config, short, pw, p12pw):
             eprint('Error generating pkcs12')
             return
+        else:
+            for op in op_on_success:
+                op()
 
 # ------------------------------------------------------------
 
