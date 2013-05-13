@@ -268,6 +268,8 @@ def genpkey(pth,config,paramfile,password=None):
 # ------------------------------------------------------------
 
 def is_password_required(pkey):
+    if not path.exists(pkey):
+        raise Exception('Key does not exist {}'.format(pkey))
     with open('/dev/null','w') as f:
         ps=subprocess.Popen(
             ['openssl','pkey',
@@ -467,9 +469,11 @@ def run():
                       help='short name')
     args.add_argument('-a','--authority',dest='authority',
                       help='authority short name (such as "ca")')
+    args.add_argument('--email',dest='email',
+                      help='email address')
     args.add_argument('-n','--name',dest='cn',
                       help='common name')
-    args.add_argument('-u','--unit',dest='unit',default='.',
+    args.add_argument('-u','--unit',dest='unit',
                       help='org unit')
     args.add_argument('-e','--pass',action='store_true',
                       dest='password',
@@ -523,8 +527,9 @@ def run():
     short=opts.short
     if not opts.short and opts.cn:
         short=re.sub(r'[^A-Za-z0-9.]+','', opts.cn)
+    email=opts.email or config['DN']['emailAddress']
     cn=opts.cn
-    unit=opts.unit
+    unit=opts.unit or config['DN']['OU']
     password=opts.password
     out=norm(opts.out) if opts.out else None
 
@@ -540,7 +545,9 @@ def run():
         pw=None
         if password:
             pw=get_password(True)
-        genpkey(pth,config,params,pw)
+        if not genpkey(pth,config,params,pw):
+            print('Error generating key', file=sys.stderr)
+            return
 
     elif op=='writeconfig':
         if not out:
@@ -556,10 +563,14 @@ def run():
         if password:
             pw=get_password(True, 'Password for CA key: ')
             set_keyring(pw,'CA',authority,'key')
-        genpkey(pths['key'], config, params, pw)
-        gencsr(pths,
-               {'CN':cn, 'OU': unit},
-               config,pw,True)
+        if not genpkey(pths['key'], config, params, pw):
+            print('Error generating CA key', file=sys.stderr)
+            return
+        if not gencsr(pths,
+                      {'CN':cn, 'OU': unit, 'emailAddress': email},
+                      config,pw,True):
+            print('Error generating CA cert', file=sys.stderr)
+            return
 
     elif op=='mkcert':
         pths=get_paths(ca_dir,authority,config)
@@ -571,11 +582,15 @@ def run():
         if password:
             pw=get_password(True, 'Password for new key: ')
             set_keyring(pw,'CA',authority,'CERT',short)
-        genpkey(ipths['key'], config, params, pw)
+        if not genpkey(ipths['key'], config, params, pw):
+            eprint('Error generating key')
+            return
         # create csr
-        gencsr(ipths,
-               {'CN':cn, 'OU': unit},
-               config,pw)
+        if not gencsr(ipths,
+                      {'CN':cn, 'OU': unit, 'emailAddress': email},
+                      config,pw):
+            eprint('Error generating CSR')
+            return
         # sign certificate
         ca_pw=None
         if is_password_required(pths['key']):
