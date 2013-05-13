@@ -5,7 +5,7 @@
 # ============================================================
 
 import os,re,sys,subprocess,argparse,getpass,traceback
-import json, tempfile
+import json, tempfile, base64
 from os import path
 
 # ------------------------------------------------------------
@@ -62,6 +62,8 @@ default_config={
         'cert': '{name}-cert.pem',
         'csr': '{name}-csr.pem',
         'key': '{name}-key.pem',
+        'p12': '{name}.p12',
+        'p12-passlen': 64,
         'expiration': 3650
         },
     'keys': {
@@ -76,6 +78,9 @@ default_config={
 # Python Functions
 # ------------------------------------------------------------
 
+def eprint(msg):
+    print(msg, file=sys.stderr)
+
 def norm(pth):
     return path.abspath(
         path.expandvars(
@@ -83,6 +88,16 @@ def norm(pth):
 
 def jnorm(*pths):
     return norm(path.join(*pths))
+
+def generate_password(bits):
+    ln=max(bits//8,1)
+    with open('/dev/urandom','rb') as f:
+        ret=base64.b32encode(f.read(ln)).lower().decode()
+        return ret[:ret.index('=') if '=' in ret else len(ret)]
+
+def fwrap(fn, value):
+    iv=(value,)
+    return lambda: fn(iv[0])
 
 # ------------------------------------------------------------
 
@@ -192,6 +207,7 @@ def get_inner_paths(ca_pths, config, simple):
     ret['cert']=jnorm(base,certs['cert'].format(name=simple))
     ret['csr']=jnorm(base,certs['csr'].format(name=simple))
     ret['key']=jnorm(base,certs['key'].format(name=simple))
+    ret['p12']=jnorm(base,certs['p12'].format(name=simple))
     return ret
 
 def ensure_inner_paths(ca_pths, config, simple):
@@ -254,6 +270,20 @@ def is_password_required(pkey):
             close_fds=False,
             shell=False)
         return ps.wait()==1
+
+def test_password(pkey, password):
+    if not path.exists(pkey) or not password:
+        return False
+    with open('/dev/null','w') as f:
+        with PasswordPipe(password) as pp:
+            ps=subprocess.Popen(
+                ['openssl','pkey',
+                 '-in',pkey,
+                 '-passin','fd:{}'.format(pp.getfd())],
+                stdout=f,stderr=f,
+                close_fds=False,
+                shell=False)
+            return ps.wait()==0
 
 # ------------------------------------------------------------
 # Certificate Generation
@@ -386,7 +416,7 @@ def run():
                       help='referenced csr')
     args.add_argument('op',
                       choices=['init','keygen','writeconfig',
-                               'mkca','mkcert','signcsr'],
+                               'mkca','mkcert','signcsr','mkp12'],
                       help='action to perform')
     
     opts=args.parse_args()
@@ -487,6 +517,26 @@ def run():
         if is_password_required(pths['key']):
             ca_pw=get_password(False, 'Password for CA key: ')
         signcsr(pths, ipths, config, ca_pw)
+    elif op=='mkp12':
+        pths=get_paths(ca_dir, authority, config)
+        if not path.exists(pths['leaves']):
+            raise Exception('CA {} does not exist'.format(authority))
+        ipths=ensure_inner_paths(pths, config, short)
+        # password handling
+        pw,p12pw=None,None
+        if is_password_required(ipths['key']):
+            pw=get_keyring('CA',authority,'CERT',short)
+            if not pw:
+                pw=get_password(False, 'Password for key: ')
+        if password:
+            p12pw=get_password(True, 'Password for PKCS12: ')
+        else:
+            genlen=config['certificates']['p12-passlen'] or 64
+            p12pw=generate_password(genlen)
+            print(p12pw)
+        if not genpkcs12(pths, ipths, config, short, pw, p12pw):
+            eprint('Error generating pkcs12')
+            return
 
 # ------------------------------------------------------------
 
